@@ -24,3 +24,4 @@ langchain-objectbox
 tantivy
 lancedb
 getpass
+sentence-transformers lancedb

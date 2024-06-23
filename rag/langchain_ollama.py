@@ -1,54 +1,60 @@
-from langchain_community.llms import Ollama
-from langchain.callbacks.manager import CallbackManager
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
-import faiss
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
+from langchain.embeddings import SentenceTransformerEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_core.output_parsers import StrOutputParser
+from langchain.prompts import ChatPromptTemplate
+from langchain_community.chat_models import ChatOllama
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+from langchain.callbacks.manager import CallbackManager
+from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 
 # Load the document
 loader = PyPDFLoader('chemistry.pdf')
-docs = loader.load()
+data = loader.load()
 
 # Split the document into chunks
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-documents = text_splitter.split_documents(docs)
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=0)
+all_splits = text_splitter.split_documents(data)
 
 # Create embeddings for the document chunks using SentenceTransformers
-model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
-document_texts = [doc.page_content for doc in documents]
-document_embeddings = model.encode(document_texts)
+embeddings = SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
 
-# Create a FAISS index and add document embeddings
-dimension = document_embeddings.shape[1]
-index = faiss.IndexFlatL2(dimension)
-index.add(document_embeddings)
+# Add to ChromaDB vector store
+vectorstore = Chroma.from_documents(
+    documents=all_splits,
+    collection_name="rag-chroma",
+    embedding=embeddings,
+)
+retriever = vectorstore.as_retriever()
+
+# Define the question relevant to the chemistry book
+question = "You are a Q&A assistant. Your goal is to answer questions as accurately as possible based on the instructions and context provided."
+
+# Perform similarity search in the vector store
+docs = retriever.similarity_search(question)
+len(docs)
+
+# Prompt template
+template = """Answer the question based only on the following context:
+{context}
+
+Question: {question}
+"""
+prompt = ChatPromptTemplate.from_template(template)
 
 # Initialize the Ollama model
-llm = Ollama(model="phi3:3.8b", callback_manager=CallbackManager([StreamingStdOutCallbackHandler()]))
+ollama_llm = "phi3:3.8b"
+model_local = ChatOllama(model=ollama_llm, callback_manager=CallbackManager([StreamingStdOutCallbackHandler()]))
 
-# Function to perform a RAG query
-def rag_query(query):
-    # Generate embedding for the query
-    query_embedding = model.encode([query])
-    
-    # Perform similarity search in the FAISS index
-    _, retrieved_indices = index.search(query_embedding, k=1)
-    
-    if len(retrieved_indices[0]) > 0:
-        context = documents[retrieved_indices[0][0]].page_content
-        # Generate a response using the context
-        prompt = f"Based on the following context, answer the question:\n\nContext: {context}\n\nQuestion: {query}\n\nAnswer:"
-        response = llm.invoke(prompt)
-        return response
-    else:
-        return "No relevant documents found."
+# Define the processing chain
+chain = (
+    {"context": retriever, "question": RunnablePassthrough()}
+    | prompt
+    | model_local
+    | StrOutputParser()
+)
 
-# Example query
-query = "List down the names of chapter in this book"
-response = rag_query(query)
+# Invoke the chain with a chemistry-related question
+response = chain.invoke("Explain the concept of chemical bonding.")
 print(response)
